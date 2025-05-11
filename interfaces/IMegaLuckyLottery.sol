@@ -44,5 +44,6 @@ interface IMegaLuckyLottery {
     function buyRandomTickets(uint256 _ticketCount) external;
     function buyCustomTicket(uint8[6] calldata _numbers) external;
     function closeLottery() external;
+    function claimPrize(uint256 _lotteryId) external;
     
 }
