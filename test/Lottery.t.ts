@@ -206,6 +206,156 @@ describe("MegaLucky Lottery System", function () {
       console.log("Total prizes:", totalPrizes);
       console.log("Treasury balance:", treasuryBalance);
     });
+
+    it("Should correctly calculate and distribute prizes for multi-tier winners", async function () {
+      const { lottery, vault, mockToken, owner, user1 } = await loadFixture(
+        deployFixture
+      );
+
+      // 1. Start lottery
+      await lottery.write.startLottery({
+        account: owner.account.address,
+      });
+
+      // 2. User approves token spending
+      const ticketPrice = await lottery.read.ticketPrice();
+      // Need approval for multiple tickets
+      await mockToken.write.approve([lottery.address, ticketPrice * 5n], {
+        account: user1.account.address,
+      });
+
+      // 3. Record initial user1 balance
+      const initialUserBalance = await mockToken.read.balanceOf([
+        user1.account.address,
+      ]);
+
+      // 4. User buys tickets that are designed to win in multiple tiers
+      // We'll configure winning numbers later to match these tickets
+      await lottery.write.buyCustomTicket([[1, 2, 3, 4, 5, 6]], {
+        account: user1.account.address,
+      }); // Will be a 6-match winner
+
+      await lottery.write.buyCustomTicket([[1, 2, 3, 4, 5, 9]], {
+        account: user1.account.address,
+      }); // Will be a 5-match winner
+
+      await lottery.write.buyCustomTicket([[1, 2, 3, 4, 9, 8]], {
+        account: user1.account.address,
+      }); // Will be a 4-match winner
+
+      // Buy two tickets for the same tier (3-match) to test multiple tickets in same tier
+      await lottery.write.buyCustomTicket([[1, 2, 3, 9, 8, 7]], {
+        account: user1.account.address,
+      }); // Will be a 3-match winner
+
+      await lottery.write.buyCustomTicket([[1, 2, 3, 8, 7, 6]], {
+        account: user1.account.address,
+      }); // Will be another 3-match winner
+
+      // 5. Force time passage for lottery to end
+      await hre.network.provider.send("evm_increaseTime", [7 * 24 * 60 * 60]);
+      await hre.network.provider.send("evm_mine");
+
+      // 6. Override the random number generation to set predictable winning numbers
+      // This requires adding a testing-only function to your contract
+      // If you've added setWinningNumbersForTesting to the lottery contract:
+      //await lottery.write.setWinningNumbersForTesting([[1, 2, 3, 4, 5, 6]], {
+      //  account: owner.account.address,
+      //});
+
+      // 7. Close lottery with our forced winning numbers
+      await lottery.write.closeLottery({
+        account: owner.account.address,
+      });
+
+      // After closing the lottery
+      console.log(
+        "Actual winning numbers:",
+        await lottery.read.getWinningNumbers()
+      );
+      console.log(
+        "User tickets indexes:",
+        await lottery.read.getUserTickets([user1.account.address])
+      );
+
+      // Debug the actual ticket contents
+      const lotteryId = await lottery.read.currentLotteryId();
+
+      // 8. Verify user won the expected tiers
+      // Get winning numbers to confirm
+      const winningNumbers = await lottery.read.getWinningNumbers();
+
+      // Check the user's wins in each tier
+      const tier6Wins = await lottery.read.getWinnerCount([
+        user1.account.address,
+        6,
+      ]);
+      const tier5Wins = await lottery.read.getWinnerCount([
+        user1.account.address,
+        5,
+      ]);
+      const tier4Wins = await lottery.read.getWinnerCount([
+        user1.account.address,
+        4,
+      ]);
+      const tier3Wins = await lottery.read.getWinnerCount([
+        user1.account.address,
+        3,
+      ]);
+
+      expect(tier6Wins).to.equal(1); // One ticket with 6 matches
+      expect(tier5Wins).to.equal(1); // One ticket with 5 matches
+      expect(tier4Wins).to.equal(1); // One ticket with 4 matches
+      expect(tier3Wins).to.equal(2); // Two tickets with 3 matches
+
+      // 9. Calculate the expected prize amount
+      const totalPool = ticketPrice * 5n; // 5 tickets purchased
+
+      // Get the prize percentages
+      const match6Prize = await lottery.read.match6Prize();
+      const match5Prize = await lottery.read.match5Prize();
+      const match4Prize = await lottery.read.match4Prize();
+      const match3Prize = await lottery.read.match3Prize();
+
+      // Calculate expected prize amounts (following your contract logic)
+      const expectedPrize6 = (totalPool * BigInt(match6Prize)) / 10000n;
+      const expectedPrize5 = (totalPool * BigInt(match5Prize)) / 10000n;
+      const expectedPrize4 = (totalPool * BigInt(match4Prize)) / 10000n;
+      const expectedPrize3 = (totalPool * BigInt(match3Prize)) / 10000n / 2n; // Split between 2 tickets
+
+      const expectedTotalPrize =
+        expectedPrize6 + expectedPrize5 + expectedPrize4 + expectedPrize3 * 2n;
+
+      // 10. Check the user's final balance to verify they received the correct prize
+      const finalUserBalance = await mockToken.read.balanceOf([
+        user1.account.address,
+      ]);
+
+      // The user should have:
+      // Initial balance - (5 tickets * price) + total prize
+      const expectedFinalBalance =
+        initialUserBalance - ticketPrice * 5n + expectedTotalPrize;
+
+      // Allow for small rounding differences in division calculations
+      const balanceDiff =
+        finalUserBalance > expectedFinalBalance
+          ? finalUserBalance - expectedFinalBalance
+          : expectedFinalBalance - finalUserBalance;
+
+      expect(balanceDiff <= 5n).to.be.true; // Allow for minor rounding differences (max 5 units)
+
+      console.log("Multi-tier winning test successful!");
+      console.log("User won in tiers:", {
+        "6 matches": tier6Wins.toString(),
+        "5 matches": tier5Wins.toString(),
+        "4 matches": tier4Wins.toString(),
+        "3 matches": tier3Wins.toString(),
+      });
+      console.log(
+        "Total prize received:",
+        (finalUserBalance - (initialUserBalance - ticketPrice * 5n)).toString()
+      );
+    });
   });
 
   describe("Multiple Lottery Rounds", function () {
