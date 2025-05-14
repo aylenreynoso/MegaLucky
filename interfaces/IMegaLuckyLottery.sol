@@ -26,16 +26,16 @@ interface IMegaLuckyLottery {
     event TicketPurchased(address indexed buyer, uint256 indexed lotteryId, uint256 ticketIndex, uint8[6] numbers);
     event WinningNumbersDrawn(uint256 indexed lotteryId, uint8[6] winningNumbers);
     event PrizeClaimed(address indexed winner, uint256 indexed lotteryId, uint8 matchCount, uint256 prize);
+    event VaultAddressUpdated(address indexed oldVault, address indexed newVault);
     
-
     /*///////////////////////////////////////////////////////////////
                               VIEWS
     //////////////////////////////////////////////////////////////*/
     function getWinningNumbers() external view returns (uint256[] memory);
-    function getPrizeDistribution() external view returns (uint256[6] memory);
     function getUserTickets(address user) external view returns (uint256[] memory);
-    function getPrizePool() external view returns (uint256);
-    
+    function getTotalPrizes() external view returns (uint256);
+    function getWinnerCount(address owner, uint8 tier) external view returns (uint16);
+    function getWinnersAddresses() external view returns (address[] memory);
 
     /*///////////////////////////////////////////////////////////////
                               LOGIC
@@ -44,6 +44,5 @@ interface IMegaLuckyLottery {
     function buyRandomTickets(uint256 _ticketCount) external;
     function buyCustomTicket(uint8[6] calldata _numbers) external;
     function closeLottery() external;
-    function claimPrize(uint256 _lotteryId) external;
     
 }

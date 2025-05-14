@@ -8,49 +8,56 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
 import {IMegaLuckyLottery} from "../interfaces/IMegaLuckyLottery.sol";
 import {IMegaLuckyVault} from "../interfaces/IMegaLuckyVault.sol";
 
-abstract contract MegaLuckyLottery is IMegaLuckyLottery, Ownable, ReentrancyGuard {
+contract MegaLuckyLottery is IMegaLuckyLottery, Ownable, ReentrancyGuard {
     IMegaLuckyVault public vault;
     
     //Stable coin used for ticket purchases cUSD
     IERC20 public paymentToken;
 
-    // Lottery configuration
-    uint256 public ticketPrice = 5 * 10**6; // $5 in USDC (6 decimals)
-    uint256 public maxTicketsPerPurchase = 100;
+    // For prize totals, keep uint256 as they can be large amounts
+    uint256 public totalPrizes;
 
-    // Lottery state
     LotteryState public currentState;
 
-    uint256 public currentLotteryId;
+    uint8[6] public winningNumbers;
+
+    // Ticket price (5 USDC with 6 decimals needs just uint64)
+    uint64 public ticketPrice = 5 * 10**6; 
+
+    // Max tickets likely under 2^16, so uint16 is sufficient
+    uint16 public maxTicketsPerPurchase = 100;
+
+    // For lottery ID, uint32 can handle decades of lotteries
+    uint32 public currentLotteryId;
+
+    // Timestamp fits in uint64
     uint256 public currentDrawTime;
     uint256 public drawPeriod = 7 days; // Weekly draw by default
 
-    // Winning number (6 digits from 0-9)
-    uint8[6] public winningNumbers;
-
-    // Map lottery ID -> all tickets
-    mapping(uint256 => Ticket[]) public allTickets;
-    // Map user address -> lottery ID -> user tickets
-    mapping(address => mapping(uint256 => uint256[])) public userTicketIndices;
-
-    // Prize distribution percentages (in basis points, 100 = 1%)
-    uint256 public match1Prize = 500;    // 5%
-    uint256 public match2Prize = 500;    // 5%
-    uint256 public match3Prize = 500;    // 5%
-    uint256 public match4Prize = 1000;   // 10%
-    uint256 public match5Prize = 2000;   // 20%
-    uint256 public match6Prize = 4000;   // 40%
-    uint256 public protocolFee = 1500;   // 15%
-    
-    // Surplus distribution percentages (in basis points, 100 = 1%)
-    uint256 public treasurySurplus = 5000;   // 50%
-    uint256 public donationSurplus = 3000;   // 30%
-    uint256 public teamSurplus = 2000;       // 20%
+    // For basis points (0-10000), uint16 is sufficient
+    uint16 public match1Prize = 500;    // 5%
+    uint16 public match2Prize = 500;    // 5%
+    uint16 public match3Prize = 500;    // 5%
+    uint16 public match4Prize = 1000;   // 10%
+    uint16 public match5Prize = 2000;   // 20%
+    uint16 public match6Prize = 4000;   // 40%
+    uint16 public protocolFee = 1500;   // 15% 
     
     // Treasury, donation and team wallets
     address public treasuryWallet;
     address public donationWallet;
     address public teamWallet;
+
+    // Change mappings to use smaller types where possible
+    mapping(uint32 => Ticket[]) public allTickets; // uint32 for lottery ID
+    mapping(address => mapping(uint32 => uint256[])) public userTicketIndices;
+    mapping(uint32 => address[]) public winnersAddresses;
+
+    // Map lottery ID -> Winner address -> tier -> winner count
+    mapping(uint32 => mapping(address => mapping(uint8 => uint16))) public winners;
+
+    // Map lottery ID -> processed status
+    mapping(uint32 => mapping(address => bool)) private processedWinners;
 
     constructor(
         address _paymentToken,
@@ -65,18 +72,25 @@ abstract contract MegaLuckyLottery is IMegaLuckyLottery, Ownable, ReentrancyGuar
 
         // Set initial lottery state to CLOSED
         currentState = LotteryState.CLOSED;
-
-        // Grant the contract owner the DEFAULT_ADMIN_ROLE
-        //_setupRole(DEFAULT_ADMIN_ROLE, msg.sender);
     }
 
+    /**
+     * @dev Set or update the vault address
+     * @param _vaultAddress Address of the vault contract
+     */
+    function setVaultAddress(address _vaultAddress) external onlyOwner {
+        require(_vaultAddress != address(0), "Invalid vault address");
+        vault = IMegaLuckyVault(_vaultAddress);
+        emit VaultAddressUpdated(address(vault), _vaultAddress);
+    }
+    
     /**
      * @dev Update lottery configuration (restricted to owner)
      */
     function updateLotteryConfig(
-        uint256 _ticketPrice,
-        uint256 _maxTicketsPerPurchase,
-        uint256 _drawPeriod
+        uint64 _ticketPrice,
+        uint16 _maxTicketsPerPurchase,
+        uint64 _drawPeriod
     ) external onlyOwner {
         require(currentState == LotteryState.CLOSED, "Cannot update during active lottery");
         
@@ -90,6 +104,7 @@ abstract contract MegaLuckyLottery is IMegaLuckyLottery, Ownable, ReentrancyGuar
      */
     function startLottery() external onlyOwner {
         require(currentState == LotteryState.CLOSED, "Lottery is already open");
+        
         currentLotteryId++;
         currentDrawTime = block.timestamp + drawPeriod;
         currentState = LotteryState.OPEN;
@@ -101,7 +116,7 @@ abstract contract MegaLuckyLottery is IMegaLuckyLottery, Ownable, ReentrancyGuar
      * @dev Purchase ticket with custom numbers
      * @param _numbers 6 numbers from 0-9 chosen by user
      */
-    function buyCustomTicket(uint8[6] calldata _numbers) external nonReentrant{
+    function buyCustomTicket(uint8[6] calldata _numbers) external nonReentrant {
         require(currentState == LotteryState.OPEN, "Lottery is not open");
         require(_numbers.length == 6, "Invalid numbers length");
         require(paymentToken.balanceOf(msg.sender) >= ticketPrice, "Insufficient balance");
@@ -111,35 +126,40 @@ abstract contract MegaLuckyLottery is IMegaLuckyLottery, Ownable, ReentrancyGuar
             require(_numbers[i] <= 9, "Numbers must be between 0-9");
         }
 
-        // Transfer payment token from user to contract
-        paymentToken.approve(address(this), ticketPrice);
-        paymentToken.transferFrom(msg.sender, address(this), ticketPrice);
+        bool success = paymentToken.transferFrom(msg.sender, address(vault), ticketPrice);
+        require(success, "Payment transfer failed");
+        
+        // Notify the vault about the received funds
+        vault.recordDeposit(ticketPrice);
 
-        _issueTicket(msg.sender, _numbers, false);
+        // Issue the ticket
+        _issueTicket(msg.sender, _numbers, true);
     }
 
     /**
      * @dev Purchase random tickets
      * @param _ticketCount Number of tickets to purchase
      */
-    function buyRandomTickets(uint256 _ticketCount) external nonReentrant{
+    function buyRandomTickets(uint256 _ticketCount) external nonReentrant {
         require(currentState == LotteryState.OPEN, "Lottery is not open");
         require(_ticketCount <= maxTicketsPerPurchase, "Exceeds max tickets per purchase");
         require(paymentToken.balanceOf(msg.sender) >= ticketPrice * _ticketCount, "Insufficient balance");
 
-        // Transfer payment token from user to contract
-        paymentToken.approve(address(this), ticketPrice * _ticketCount);
-        paymentToken.transferFrom(msg.sender, address(this), ticketPrice * _ticketCount);
+        // Transfer payment token DIRECTLY to vault (not to this contract)
+        bool success = paymentToken.transferFrom(msg.sender, address(vault), ticketPrice * _ticketCount);
+        require(success, "Payment transfer failed");
+        
+        // Notify the vault about the received funds
+        vault.recordDeposit(ticketPrice * _ticketCount);
 
-        // Generate random numbers for the ticket
-        for (uint256 i = 0; i < 6; i++) {
+        // Generate random numbers for EACH ticket
+        for (uint256 i = 0; i < _ticketCount; i++) {
             uint8[6] memory numbers = _generateRandomTicketNumbers(
                 uint256(keccak256(abi.encodePacked(msg.sender, block.timestamp, i))) //seed
             );
 
             _issueTicket(msg.sender, numbers, false);
         }
-        
     }
 
     /**
@@ -176,27 +196,164 @@ abstract contract MegaLuckyLottery is IMegaLuckyLottery, Ownable, ReentrancyGuar
     }
 
     /**
-     * @dev Close lottery and request random number for drawing
+     * @dev Close lottery and draw winning numbers
      */
     function closeLottery() external onlyOwner {
         require(currentState == LotteryState.OPEN, "Lottery is not open");
         require(block.timestamp >= currentDrawTime, "Draw time not reached");
 
         // Draw winning numbers
-        for (uint256 i = 0; i < 6; i++) {
+        for (uint8 i = 0; i < 6; i++) {
             winningNumbers[i] = uint8(uint256(keccak256(abi.encodePacked(block.timestamp, i))) % 10);
         }
 
-        currentState = LotteryState.CALCULATING_WINNER;
+        uint16[7] memory amountWinnersPerTier = _processWinners();
+        uint256[7] memory prizesPerTier = _calculatePrizePerTier();
+        uint256[7] memory amountsPerTier = _calculatePrizePerWinner(amountWinnersPerTier, prizesPerTier);
+        
+        _calculateTotalPrizes(amountsPerTier, amountWinnersPerTier);
+
+        require(totalPrizes <= vault.getCurrentLotteryPool(), "Insufficient funds in pool");
+
+        vault.distributePrizes(amountsPerTier);
+        vault.distributeFees(treasuryWallet, donationWallet, teamWallet);
+
+        currentState = LotteryState.CLOSED;
 
         emit WinningNumbersDrawn(currentLotteryId, winningNumbers);
     }
 
     /**
-    * @dev Process all tickets to find winners for each tier
-    */
-    function _processWinners() internal {}
+     * @dev Process all tickets to find winners for each tier
+     */
+    function _processWinners() internal returns (uint16[7] memory) { 
+        Ticket[] storage tickets = allTickets[currentLotteryId];
+        
+        // Clear previous winners array
+        delete winnersAddresses[currentLotteryId];
+        
+        // Count winners for each tier
+        uint16[7] memory winnerCounts;  
+        
+        for (uint256 i = 0; i < tickets.length; i++) {
+            Ticket storage ticket = tickets[i];
+            uint8 matchCount = _countMatches(ticket.numbers);
+            
+            if (matchCount > 0) {
+                // Increment winner count for this tier
+                winnerCounts[matchCount]++;
+                
+                // Record winner's ticket count for this tier
+                winners[currentLotteryId][ticket.owner][matchCount]++;
+                
+                // Only add to winnersAddresses once per address
+                if (!processedWinners[currentLotteryId][ticket.owner]) {
+                    winnersAddresses[currentLotteryId].push(ticket.owner);
+                    processedWinners[currentLotteryId][ticket.owner] = true;
+                }
+            }
+        }
+        
+        return winnerCounts;
+    }
 
+    function _calculatePrizePerTier() internal view returns (uint256[7] memory) {
+        uint256 totalPool = vault.getCurrentLotteryPool();
+        uint256[7] memory prizes;
+
+        prizes[1] = (totalPool * match1Prize) / 10000;
+        prizes[2] = (totalPool * match2Prize) / 10000;
+        prizes[3] = (totalPool * match3Prize) / 10000;
+        prizes[4] = (totalPool * match4Prize) / 10000;
+        prizes[5] = (totalPool * match5Prize) / 10000;
+        prizes[6] = (totalPool * match6Prize) / 10000;
+
+        return prizes;
+    }
+
+    function _calculatePrizePerWinner(uint16[7] memory winnersPerTier, uint256[7] memory prizesPerTier) internal pure returns (uint256[7] memory) {
+        
+        uint256[7] memory amounts;
+
+        for (uint8 tier = 1; tier <= 6; tier++) {
+            amounts[tier] = winnersPerTier[tier] > 0 ? prizesPerTier[tier] / winnersPerTier[tier] : 0;
+        }
+        
+        return amounts;
+    }
+
+    /**
+     * @dev Count how many numbers match from left to right
+     */
+    function _countMatches(uint8[6] memory _numbers) internal view returns (uint8) {
+        uint8 matchCount = 0;
+        
+        for (uint8 i = 0; i < 6; i++) {
+            if (_numbers[i] == winningNumbers[i]) {
+                matchCount++;
+            } else {
+                break; // Stop counting if a mismatch is found
+            }
+        }
+        
+        return matchCount;
+    }
+
+
+    function getWinnersAddresses() external view returns (address[] memory){
+        return winnersAddresses[currentLotteryId];
+    }
     
- 
+    /**
+     * @dev Get the number of winning tickets for a specific owner and tier
+     * @param owner The address of the ticket owner
+     * @param tier The winning tier (1-6 matches)
+     * @return Number of winning tickets for this owner in this tier
+     */
+    function getWinnerCount(address owner, uint8 tier) external view returns (uint16) {
+        return winners[currentLotteryId][owner][tier];
+    }
+
+    /**
+     * @dev Get winning numbers for the current lottery
+     * @return Array of winning numbers
+     */
+    function getWinningNumbers() external view returns (uint256[] memory) {
+        uint256[] memory numbers = new uint256[](6);
+        for (uint8 i = 0; i < 6; i++) {
+            numbers[i] = winningNumbers[i];
+        }
+        return numbers;
+    }
+
+    /**
+     * @dev Get user's tickets for the current lottery
+     * @param user Address of the user
+     * @return Array of ticket indices owned by the user
+     */
+    function getUserTickets(address user) external view returns (uint256[] memory) {
+        return userTicketIndices[user][currentLotteryId];
+    }
+
+    /**
+     * @dev Calculate total potential prizes for the current lottery
+     * @param amountsPerTier Prize amount per winner for each tier
+     * @param amountWinnersPerTier Number of winners for each tier
+     */
+    function _calculateTotalPrizes(uint256[7] memory amountsPerTier, uint16[7] memory amountWinnersPerTier) internal {
+        totalPrizes = 0;
+        // Calculate prize for this winner across all tiers
+        for (uint8 tier = 1; tier <= 6; tier++) {
+            totalPrizes += amountsPerTier[tier] * amountWinnersPerTier[tier];
+        }
+    }
+
+    /**
+     * @dev Get the total prize amount for the current lottery
+     * @return Total prize amount to be distributed
+     */
+    function getTotalPrizes() external view returns (uint256) {
+        return totalPrizes;
+    }
+
 }
