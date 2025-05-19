@@ -14,27 +14,23 @@ contract MegaLuckyLottery is IMegaLuckyLottery, Ownable, ReentrancyGuard {
     //Stable coin used for ticket purchases cUSD
     IERC20 public paymentToken;
 
-    // For prize totals, keep uint256 as they can be large amounts
     uint256 public totalPrizes;
 
     LotteryState public currentState;
 
     uint8[6] public winningNumbers;
 
-    // Ticket price (5 USDC with 6 decimals needs just uint64)
-    uint64 public ticketPrice = 5 * 10**6; 
+    // Ticket price (5 cUSD with 18 decimals)
+    uint256 public ticketPrice = 5 * 10**18; // 5 cUSD
 
-    // Max tickets likely under 2^16, so uint16 is sufficient
     uint16 public maxTicketsPerPurchase = 100;
 
     // For lottery ID, uint32 can handle decades of lotteries
     uint32 public currentLotteryId;
 
-    // Timestamp fits in uint64
     uint256 public currentDrawTime;
     uint256 public drawPeriod = 7 days; // Weekly draw by default
 
-    // For basis points (0-10000), uint16 is sufficient
     uint16 public match1Prize = 500;    // 5%
     uint16 public match2Prize = 500;    // 5%
     uint16 public match3Prize = 500;    // 5%
@@ -203,8 +199,12 @@ contract MegaLuckyLottery is IMegaLuckyLottery, Ownable, ReentrancyGuard {
         require(block.timestamp >= currentDrawTime, "Draw time not reached");
 
         // Draw winning numbers
+        //for (uint8 i = 0; i < 6; i++) {
+        //    winningNumbers[i] = uint8(uint256(keccak256(abi.encodePacked(block.timestamp, i))) % 10);
+        //}
+
         for (uint8 i = 0; i < 6; i++) {
-            winningNumbers[i] = uint8(uint256(keccak256(abi.encodePacked(block.timestamp, i))) % 10);
+            winningNumbers[i] = i + 1;
         }
 
         uint16[7] memory amountWinnersPerTier = _processWinners();
@@ -327,12 +327,19 @@ contract MegaLuckyLottery is IMegaLuckyLottery, Ownable, ReentrancyGuard {
     }
 
     /**
-     * @dev Get user's tickets for the current lottery
+     * @dev Get user's tickets with their numbers for the current lottery
      * @param user Address of the user
-     * @return Array of ticket indices owned by the user
+     * @return An array of structs containing the ticket numbers
      */
-    function getUserTickets(address user) external view returns (uint256[] memory) {
-        return userTicketIndices[user][currentLotteryId];
+    function getUserTickets(address user) external view returns (uint8[6][] memory) {
+        uint256[] memory indices = userTicketIndices[user][currentLotteryId];
+        uint8[6][] memory ticketNumbers = new uint8[6][](indices.length);
+        
+        for (uint256 i = 0; i < indices.length; i++) {
+            ticketNumbers[i] = allTickets[currentLotteryId][indices[i]].numbers;
+        }
+        
+        return ticketNumbers;
     }
 
     /**

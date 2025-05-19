@@ -32,7 +32,7 @@ interface IMegaLuckyLottery {
                               VIEWS
     //////////////////////////////////////////////////////////////*/
     function getWinningNumbers() external view returns (uint256[] memory);
-    function getUserTickets(address user) external view returns (uint256[] memory);
+    function getUserTickets(address user) external view returns (uint8[6][] memory);
     function getTotalPrizes() external view returns (uint256);
     function getWinnerCount(address owner, uint8 tier) external view returns (uint16);
     function getWinnersAddresses() external view returns (address[] memory);

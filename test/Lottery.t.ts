@@ -356,6 +356,52 @@ describe("MegaLucky Lottery System", function () {
         (finalUserBalance - (initialUserBalance - ticketPrice * 5n)).toString()
       );
     });
+
+    it("Should correctly return user ticket numbers", async function () {
+      const { lottery, mockToken, owner, user1 } = await loadFixture(
+        deployFixture
+      );
+
+      // Start lottery
+      await lottery.write.startLottery({
+        account: owner.account.address,
+      });
+
+      // User approves token spending
+      const ticketPrice = await lottery.read.ticketPrice();
+      await mockToken.write.approve([lottery.address, ticketPrice * 3n], {
+        account: user1.account.address,
+      });
+
+      // Define tickets with known numbers (as regular numbers)
+      const ticket1 = [1, 2, 3, 4, 5, 6] as const;
+      const ticket2 = [7, 8, 9, 1, 1, 2] as const;
+      const ticket3 = [3, 4, 5, 6, 7, 1] as const;
+
+      // Buy custom tickets
+      await lottery.write.buyCustomTicket([ticket1], {
+        account: user1.account.address,
+      });
+
+      await lottery.write.buyCustomTicket([ticket2], {
+        account: user1.account.address,
+      });
+
+      await lottery.write.buyCustomTicket([ticket3], {
+        account: user1.account.address,
+      });
+
+      // Retrieve user tickets
+      const userTickets = await lottery.read.getUserTickets([
+        user1.account.address,
+      ]);
+
+      // Verify ticket numbers match
+      expect(userTickets.length).to.equal(3);
+      expect(userTickets[0]).to.deep.equal(ticket1);
+      expect(userTickets[1]).to.deep.equal(ticket2);
+      expect(userTickets[2]).to.deep.equal(ticket3);
+    });
   });
 
   describe("Multiple Lottery Rounds", function () {
